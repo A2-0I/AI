@@ -15,7 +15,7 @@
     .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
     @media (max-width:900px){.grid{grid-template-columns:1fr}}
     .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-    input{width:100%;padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:#0f1720;color:var(--text)}
+    input,select{width:100%;padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:#0f1720;color:var(--text)}
     button{padding:10px 14px;border-radius:999px;border:1px solid var(--line);background:#0f1720;color:var(--text);cursor:pointer}
     button.primary{background:linear-gradient(135deg,var(--accent),var(--accent2));border:none;color:#0b0f14;font-weight:700}
     .muted{color:var(--muted);font-size:13px;line-height:1.5}
@@ -44,7 +44,7 @@ body{font-family:"Pretendard Variable","Pretendard","Noto Sans KR",-apple-system
     </div>
 
     <div class="card muted" style="margin-bottom:14px">
-      실현수익은 아래에서 증감 금액만 입력하면 <b>app_realized_logs</b>에 기록되고 <b>app_users.realized_amount</b>가 함께 갱신됩니다.
+      실현수익은 선택한 AI PROCESS 투자에 반영되며, 유저의 수익 금액·그래프·수익 로그에 함께 반영됩니다.
     </div>
 
     <div class="grid">
@@ -62,7 +62,12 @@ body{font-family:"Pretendard Variable","Pretendard","Noto Sans KR",-apple-system
         </div>
 
         <hr style="border:none;border-top:1px solid var(--line);margin:14px 0"/>
-        <div class="pill" style="margin-bottom:10px">2) 증감 적용</div>
+        <div class="pill" style="margin-bottom:10px">2) AI PROCESS 선택</div>
+        <div class="muted" style="margin-bottom:6px">수익을 반영할 투자</div>
+        <select id="selInvestment" disabled><option value="">유저를 먼저 조회해주세요.</option></select>
+
+        <hr style="border:none;border-top:1px solid var(--line);margin:14px 0"/>
+        <div class="pill" style="margin-bottom:10px">3) 증감 적용</div>
         <div class="muted" style="margin-bottom:6px">증감할 금액(원)</div>
         <input id="inpDelta" placeholder="예: 10000 또는 -10000" />
         <div class="row" style="margin-top:10px"><button type="button" class="primary" id="btnApply">확인</button></div>
@@ -93,6 +98,7 @@ body{font-family:"Pretendard Variable","Pretendard","Noto Sans KR",-apple-system
       const okBox = document.getElementById('okBox');
       const sb = (window.aiProcessor && typeof window.aiProcessor.sb === 'function') ? window.aiProcessor.sb() : null;
       let selectedUser = null;
+      let selectedInvestments = [];
 
       function setErr(msg){ errBox.textContent = msg || ''; okBox.textContent = ''; }
       function setOk(msg){ okBox.textContent = msg || ''; errBox.textContent = ''; }
@@ -122,6 +128,33 @@ body{font-family:"Pretendard Variable","Pretendard","Noto Sans KR",-apple-system
         }).join('');
       }
 
+
+      async function loadInvestments(userId){
+        const sel = document.getElementById('selInvestment');
+        sel.disabled = true;
+        sel.innerHTML = '<option value="">불러오는 중...</option>';
+        const { data, error } = await sb.from('app_investments')
+          .select('id, processor_code, display_name, amount, realized_amount, status, created_at')
+          .eq('user_id', userId)
+          .order('created_at', { ascending: false });
+        if (error) {
+          console.error('[loadInvestments]', error);
+          sel.innerHTML = '<option value="">투자 목록을 불러오지 못했습니다.</option>';
+          return;
+        }
+        selectedInvestments = data || [];
+        if (!selectedInvestments.length) {
+          sel.innerHTML = '<option value="">등록된 투자가 없습니다.</option>';
+          return;
+        }
+        sel.innerHTML = '<option value="">수익을 반영할 AI PROCESS를 선택하세요.</option>' + selectedInvestments.map(i => {
+          const name = i.display_name || i.processor_code || i.id;
+          const status = i.status || '-';
+          return `<option value="${i.id}">${name} · ${status} · 투자금 ${fmt.format(Number(i.amount||0))}원 · 수익 ${fmt.format(Number(i.realized_amount||0))}원</option>`;
+        }).join('');
+        sel.disabled = false;
+      }
+
       async function findUser(){
         setErr(''); setOk('');
         const username = (document.getElementById('inpUsername').value || '').trim();
@@ -132,7 +165,7 @@ body{font-family:"Pretendard Variable","Pretendard","Noto Sans KR",-apple-system
         selectedUser = data;
         document.getElementById('txtUser').textContent = `${data.username} (${data.name || '-'})`;
         document.getElementById('txtRealized').textContent = fmt.format(Number(data.realized_amount || 0)) + ' 원';
-        await loadLogs(data.id);
+        await Promise.all([loadLogs(data.id), loadInvestments(data.id)]);
         setOk('유저 조회 완료');
       }
 
@@ -143,13 +176,16 @@ body{font-family:"Pretendard Variable","Pretendard","Noto Sans KR",-apple-system
         const delta = Number(raw);
         if (!raw || !Number.isFinite(delta) || delta === 0) return setErr('증감할 금액을 올바르게 입력해주세요. (0 제외)');
 
-        const { error } = await sb.rpc('admin_adjust_realized', { p_user_id: selectedUser.id, p_delta: delta, p_note: 'admin-profit' });
+        const investmentId = document.getElementById('selInvestment').value;
+        if (!investmentId) return setErr('수익을 반영할 AI PROCESS를 선택해주세요.');
+
+        const { error } = await sb.rpc('admin_adjust_investment_realized', { p_user_id: selectedUser.id, p_investment_id: investmentId, p_delta: delta, p_note: 'admin-profit' });
         if (error) { console.error('[applyDelta]', error); setErr('적용 실패: ' + (error.message || '오류')); return; }
 
         selectedUser.realized_amount = Number(selectedUser.realized_amount || 0) + delta;
         document.getElementById('txtRealized').textContent = fmt.format(Number(selectedUser.realized_amount || 0)) + ' 원';
         document.getElementById('inpDelta').value = '';
-        await loadLogs(selectedUser.id);
+        await Promise.all([loadLogs(selectedUser.id), loadInvestments(selectedUser.id)]);
         setOk(`적용 완료: ${delta > 0 ? '+' : ''}${fmt.format(delta)} 원`);
       }
 
